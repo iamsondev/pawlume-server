@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const admin = require("firebase-admin");
 
 dotenv.config();
 const app = express();
@@ -31,6 +32,29 @@ client
 
     console.log("✅ MongoDB connected!");
 
+    const serviceAccount = require("./firebase_admin_key.json");
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+
+    // verify
+    const verifyFBToken = async (req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: "unauthorized access" });
+      }
+
+      // verify the token
+      try {
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        req.user = decodedToken; // user info: uid, email, etc.
+
+        next();
+      } catch (err) {
+        return res.status(401).send("Invalid or expired token");
+      }
+    };
     // Home route
     app.get("/", (req, res) => {
       res.send("Welcome to Pawlume API 🚀");
