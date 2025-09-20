@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 dotenv.config();
 const app = express();
@@ -17,49 +17,72 @@ const client = new MongoClient(uri, {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  }
+  },
 });
 
-// 🔹 Connect and define db & collection directly
 client.connect().then(() => {
-  const db = client.db("pawlume_server");          // Database name
-  const petsCollection = db.collection("pets");    // Collection name
+  const db = client.db("pawlume_server");
+  const petsCollection = db.collection("pets");
 
+  console.log("✅ MongoDB connected!");
 
-  console.log("MongoDB connected!");
-
-  // Simple route
+  // Home route
   app.get("/", (req, res) => {
     res.send("Welcome to Pawlume API 🚀");
   });
 
-  // Pets route
+  // Pet listing route
   app.get("/pets", async (req, res) => {
-  try {
-    const { search, category } = req.query;
-    const query = { adopted: false };
+    try {
+      const { search = "", category = "", page = 1, limit = 6 } = req.query;
 
-    if (search) {
-      query.name = { $regex: search, $options: "i" }; // case-insensitive search
+      const query = { adopted: false };
+      if (search) query.name = { $regex: search, $options: "i" };
+      if (category) query.category = { $regex: category, $options: "i" };
+
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      const total = await petsCollection.countDocuments(query);
+      const totalPages = Math.ceil(total / limit);
+
+      const pets = await petsCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .toArray();
+
+      res.json({
+        pets,
+        totalPages,
+        currentPage: parseInt(page),
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to fetch pets" });
     }
-    if (category) {
-      query.category = category;
+  });
+
+  // Fetch pet details by ID
+  app.get("/pets/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid pet ID" });
+      }
+
+      const pet = await petsCollection.findOne({ _id: new ObjectId(id) });
+      if (!pet) return res.status(404).json({ error: "Pet not found" });
+
+      res.json(pet);
+    } catch (err) {
+      console.error("❌ Error fetching pet by ID:", err);
+      res.status(500).json({ error: "Failed to fetch pet" });
     }
+  });
 
-    const pets = await petsCollection
-      .find(query)
-      .sort({ createdAt: -1 }) // newest first
-      .toArray();
-
-    res.json(pets);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
- });
-
-  // Start Server
+  // Start server
   app.listen(PORT, () => {
     console.log(`✅ Pawlume Server is running on port ${PORT}`);
   });
-
 }).catch(console.dir);
