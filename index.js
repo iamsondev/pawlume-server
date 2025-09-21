@@ -40,21 +40,23 @@ client
 
     // verify
     const verifyFBToken = async (req, res, next) => {
-      const authHeader = req.headers.authorization;
+      const authHeader = req.headers.authorization; // Bearer TOKEN
       if (!authHeader) {
-        return res.status(401).send({ message: "unauthorized access" });
+        return res.status(401).send({ message: "Unauthorized access" });
       }
 
-      // verify the token
+      const token = authHeader.split(" ")[1]; // "Bearer TOKEN" থেকে TOKEN আলাদা করা
+
       try {
         const decodedToken = await admin.auth().verifyIdToken(token);
-        req.user = decodedToken; // user info: uid, email, etc.
-
+        req.user = decodedToken;
         next();
       } catch (err) {
-        return res.status(401).send("Invalid or expired token");
+        console.error(err);
+        return res.status(401).send({ message: "Invalid or expired token" });
       }
     };
+
     // Home route
     app.get("/", (req, res) => {
       res.send("Welcome to Pawlume API 🚀");
@@ -136,6 +138,54 @@ client
       } catch (err) {
         console.error("❌ Error fetching pet by ID:", err);
         res.status(500).json({ error: "Failed to fetch pet" });
+      }
+    });
+
+    // server.js
+    app.post("/pets", verifyFBToken, async (req, res) => {
+      console.log("Add Pet request body:", req.body);
+      console.log("User from token:", req.user);
+
+      try {
+        const {
+          name,
+          age,
+          category,
+          location,
+          shortDescription,
+          longDescription,
+          imageUrl,
+        } = req.body;
+
+        if (!name || !age || !category || !location || !imageUrl) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        const newPet = {
+          name,
+          age,
+          category,
+          location,
+          shortDescription: shortDescription || "",
+          longDescription: longDescription || "",
+          imageUrl,
+          adopted: false,
+          createdAt: new Date(),
+          ownerEmail: req.user.email,
+        };
+
+        const result = await petsCollection.insertOne(newPet);
+
+        res.status(201).json({
+          message: "Pet added successfully",
+          petId: result.insertedId,
+          pet: newPet,
+        });
+      } catch (err) {
+        console.error("Error adding pet:", err);
+        res
+          .status(500)
+          .json({ error: "Failed to add pet", details: err.message });
       }
     });
 
