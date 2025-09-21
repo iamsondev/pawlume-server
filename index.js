@@ -11,6 +11,12 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
+const serviceAccount = require("./firebase_admin_key.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.r1yzage.mongodb.net/?retryWrites=true&w=majority`;
 
 const client = new MongoClient(uri, {
@@ -32,28 +38,33 @@ client
 
     console.log("✅ MongoDB connected!");
 
-    const serviceAccount = require("./firebase_admin_key.json");
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-
     // verify
     const verifyFBToken = async (req, res, next) => {
-      const authHeader = req.headers.authorization; // Bearer TOKEN
+      const authHeader = req.headers.authorization;
       if (!authHeader) {
-        return res.status(401).send({ message: "Unauthorized access" });
+        return res.status(401).json({ message: "Unauthorized access" });
       }
 
-      const token = authHeader.split(" ")[1]; // "Bearer TOKEN" থেকে TOKEN আলাদা করা
+      const token = authHeader.split(" ")[1];
+      if (!token) {
+        return res.status(401).json({ message: "Unauthorized access" });
+      }
 
       try {
-        const decodedToken = await admin.auth().verifyIdToken(token);
-        req.user = decodedToken;
+        // ✅ Verify Firebase token
+        const decoded = await admin.auth().verifyIdToken(token);
+
+        // ✅ Fetch user role from DB
+        const userInDB = await usersCollection.findOne({
+          email: decoded.email,
+        });
+        decoded.role = userInDB?.role || "user"; // default fallback to user
+
+        req.decoded = decoded;
         next();
-      } catch (err) {
-        console.error(err);
-        return res.status(401).send({ message: "Invalid or expired token" });
+      } catch (error) {
+        console.error("❌ Token verification error:", error);
+        return res.status(403).json({ message: "Forbidden access" });
       }
     };
 
@@ -92,11 +103,14 @@ client
     });
 
     // Pet listing route
-    app.get("/pets", async (req, res) => {
+    app.get("/pets", verifyFBToken, async (req, res) => {
       try {
-        const { search = "", category = "", page = 1, limit = 6 } = req.query;
+        const { search = "", category = "", page = 1, limit = 10 } = req.query;
 
-        const query = { adopted: false };
+        // Only fetch pets added by the logged-in user
+        const ownerEmail = req.user.email;
+        const query = { ownerEmail }; // filter by logged-in user
+
         if (search) query.name = { $regex: search, $options: "i" };
         if (category) query.category = { $regex: category, $options: "i" };
 
@@ -116,8 +130,8 @@ client
           totalPages,
           currentPage: parseInt(page),
         });
-      } catch (error) {
-        console.error(error);
+      } catch (err) {
+        console.error(err);
         res.status(500).json({ error: "Failed to fetch pets" });
       }
     });
@@ -143,9 +157,6 @@ client
 
     // server.js
     app.post("/pets", verifyFBToken, async (req, res) => {
-      console.log("Add Pet request body:", req.body);
-      console.log("User from token:", req.user);
-
       try {
         const {
           name,
@@ -157,8 +168,12 @@ client
           imageUrl,
         } = req.body;
 
-        if (!name || !age || !category || !location || !imageUrl) {
-          return res.status(400).json({ error: "Missing required fields" });
+        // 🔑 Change here: req.user → req.decoded
+        const ownerEmail = req.decoded?.email;
+        if (!ownerEmail) {
+          return res
+            .status(401)
+            .json({ message: "Unauthorized: No email found" });
         }
 
         const newPet = {
@@ -166,12 +181,12 @@ client
           age,
           category,
           location,
-          shortDescription: shortDescription || "",
-          longDescription: longDescription || "",
+          shortDescription,
+          longDescription,
           imageUrl,
           adopted: false,
           createdAt: new Date(),
-          ownerEmail: req.user.email,
+          ownerEmail, // attach owner email from decoded token
         };
 
         const result = await petsCollection.insertOne(newPet);
@@ -183,9 +198,21 @@ client
         });
       } catch (err) {
         console.error("Error adding pet:", err);
-        res
-          .status(500)
-          .json({ error: "Failed to add pet", details: err.message });
+        res.status(500).json({ error: "Failed to add pet" });
+      }
+    });
+
+    // Get pets added by logged-in user
+    app.get("/my-added", verifyFBToken, async (req, res) => {
+      try {
+        const userEmail = req.decoded.email;
+        const myPets = await petsCollection
+          .find({ ownerEmail: userEmail })
+          .toArray();
+        res.json(myPets);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
       }
     });
 
