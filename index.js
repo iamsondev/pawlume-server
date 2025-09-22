@@ -216,7 +216,105 @@ client
       }
     });
 
+    app.put("/pets/:id", verifyFBToken, async (req, res) => {
+      const { id } = req.params;
+      const updatedPet = { ...req.body };
+      delete updatedPet._id; // ✅ remove _id to avoid immutable field error
+
+      const userEmail = req.decoded.email;
+
+      try {
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid pet ID" });
+        }
+
+        const existingPet = await petsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!existingPet)
+          return res.status(404).json({ message: "Pet not found" });
+        if (existingPet.ownerEmail !== userEmail) {
+          return res
+            .status(403)
+            .json({ message: "Not allowed to update this pet" });
+        }
+
+        const result = await petsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedPet }
+        );
+
+        res.json({
+          message: "Pet updated successfully",
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    app.delete("/pets/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid pet ID" });
+        }
+
+        const result = await petsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({ message: "Pet not found" });
+        }
+
+        res.json({ message: "Pet deleted successfully" });
+      } catch (err) {
+        console.error("Delete pet error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
     // adaptation
+    // Mark pet as adopted
+    app.patch("/pets/adopt/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid pet ID" });
+        }
+
+        // Use existing petsCollection
+        const existingPet = await petsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!existingPet) {
+          return res.status(404).json({ message: "Pet not found" });
+        }
+
+        if (existingPet.adopted) {
+          return res.status(400).json({ message: "Pet is already adopted" });
+        }
+
+        const result = await petsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { adopted: true } }
+        );
+
+        if (result.modifiedCount === 1) {
+          res.status(200).json({ message: "Pet marked as adopted" });
+        } else {
+          res.status(500).json({ message: "Failed to mark as adopted" });
+        }
+      } catch (err) {
+        console.error("❌ Adopt pet error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
     app.post("/adoptions", async (req, res) => {
       try {
         const {
