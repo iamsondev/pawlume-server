@@ -370,6 +370,106 @@ client
     });
 
     // Donation
+    // Create Donation Campaign (protected)
+    app.post("/donationCampaigns/create", verifyFBToken, async (req, res) => {
+      try {
+        const {
+          imageUrl,
+          maxAmount,
+          lastDate,
+          shortDescription,
+          longDescription,
+        } = req.body;
+
+        // Validate required fields
+        if (
+          !imageUrl ||
+          !maxAmount ||
+          !lastDate ||
+          !shortDescription ||
+          !longDescription
+        ) {
+          return res.status(400).json({ message: "All fields are required" });
+        }
+
+        const newCampaign = {
+          imageUrl,
+          maxAmount: parseFloat(maxAmount),
+          lastDate: new Date(lastDate),
+          shortDescription,
+          longDescription,
+          createdAt: new Date(),
+          ownerEmail: req.decoded.email, // user email from Firebase token
+        };
+
+        const result = await donationCollection.insertOne(newCampaign);
+
+        res.status(201).json({
+          message: "Donation campaign created successfully",
+          campaignId: result.insertedId,
+          campaign: newCampaign,
+        });
+      } catch (err) {
+        console.error("Create Donation Campaign Error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // Get My Donation Campaigns (protected)
+    app.get(
+      "/donationCampaigns/my-campaigns",
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email; // user email from Firebase token
+          const campaigns = await donationCollection
+            .find({ ownerEmail: email })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          res.status(200).json(campaigns);
+        } catch (err) {
+          console.error("Fetch My Campaigns Error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // Optional: Get Donators for a campaign
+    app.get(
+      "/donationCampaigns/donators/:id",
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const campaignId = req.params.id;
+          const campaign = await donationCollection.findOne({
+            _id: new ObjectId(campaignId),
+          });
+
+          if (!campaign)
+            return res.status(404).json({ message: "Campaign not found" });
+
+          res.json(campaign.donators || []);
+        } catch (err) {
+          console.error("Fetch Donators Error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // Optional: Get all donation campaigns
+    app.get("/donationCampaigns", async (req, res) => {
+      try {
+        const campaigns = await donationCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(campaigns);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
 
     // Start server
     app.listen(PORT, () => {
