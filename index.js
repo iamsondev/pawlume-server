@@ -103,36 +103,30 @@ client
     });
 
     // Pet listing route
+    // Example
     app.get("/pets", verifyFBToken, async (req, res) => {
       try {
-        const { search = "", category = "", page = 1, limit = 10 } = req.query;
+        const { search = "", category = "", page = 1, limit = 6 } = req.query;
 
-        // Only fetch pets added by the logged-in user
-        const ownerEmail = req.user.email;
-        const query = { ownerEmail }; // filter by logged-in user
-
+        const query = {};
         if (search) query.name = { $regex: search, $options: "i" };
-        if (category) query.category = { $regex: category, $options: "i" };
+        if (category) query.category = category;
 
-        const skip = (parseInt(page) - 1) * parseInt(limit);
         const total = await petsCollection.countDocuments(query);
-        const totalPages = Math.ceil(total / limit);
-
         const pets = await petsCollection
           .find(query)
-          .sort({ createdAt: -1 })
-          .skip(skip)
+          .skip((page - 1) * limit)
           .limit(parseInt(limit))
           .toArray();
 
         res.json({
           pets,
-          totalPages,
           currentPage: parseInt(page),
+          totalPages: Math.ceil(total / parseInt(limit)),
         });
       } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to fetch pets" });
+        console.error("Fetch pets error:", err);
+        res.status(500).json({ message: "Server error" });
       }
     });
 
@@ -374,6 +368,7 @@ client
     app.post("/donationCampaigns/create", verifyFBToken, async (req, res) => {
       try {
         const {
+          petName,
           imageUrl,
           maxAmount,
           lastDate,
@@ -393,6 +388,7 @@ client
         }
 
         const newCampaign = {
+          petName,
           imageUrl,
           maxAmount: parseFloat(maxAmount),
           lastDate: new Date(lastDate),
@@ -430,6 +426,102 @@ client
           res.status(200).json(campaigns);
         } catch (err) {
           console.error("Fetch My Campaigns Error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // Edit Donation Campaign (protected)
+    app.put("/donationCampaigns/edit/:id", verifyFBToken, async (req, res) => {
+      try {
+        const campaignId = req.params.id;
+        const {
+          petName,
+          imageUrl,
+          maxAmount,
+          lastDate,
+          shortDescription,
+          longDescription,
+        } = req.body;
+
+        // Validate required fields
+        if (
+          !petName ||
+          !imageUrl ||
+          !maxAmount ||
+          !lastDate ||
+          !shortDescription ||
+          !longDescription
+        ) {
+          return res.status(400).json({ message: "All fields are required" });
+        }
+
+        // Find campaign and check ownership
+        const campaign = await donationCollection.findOne({
+          _id: new ObjectId(campaignId),
+        });
+        if (!campaign)
+          return res.status(404).json({ message: "Campaign not found" });
+        if (campaign.ownerEmail !== req.decoded.email) {
+          return res
+            .status(403)
+            .json({ message: "You are not authorized to edit this campaign" });
+        }
+
+        // Update the campaign
+        const updatedCampaign = {
+          petName,
+          imageUrl,
+          maxAmount: parseFloat(maxAmount),
+          lastDate: new Date(lastDate),
+          shortDescription,
+          longDescription,
+          updatedAt: new Date(),
+        };
+
+        await donationCollection.updateOne(
+          { _id: new ObjectId(campaignId) },
+          { $set: updatedCampaign }
+        );
+
+        res.json({
+          message: "Donation campaign updated successfully",
+          campaign: updatedCampaign,
+        });
+      } catch (err) {
+        console.error("Edit Donation Campaign Error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // Toggle pause/unpause
+    app.patch(
+      "/donationCampaigns/pause/:id",
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const campaign = await donationCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!campaign) {
+            return res.status(404).json({ message: "Campaign not found" });
+          }
+
+          const updatedCampaign = await donationCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { paused: !campaign.paused } } // toggle paused
+          );
+
+          res.status(200).json({
+            message: `Campaign is now ${
+              !campaign.paused ? "Paused" : "Active"
+            }`,
+            paused: !campaign.paused,
+          });
+        } catch (err) {
+          console.error("Pause/Unpause Error:", err);
           res.status(500).json({ message: "Server error" });
         }
       }
