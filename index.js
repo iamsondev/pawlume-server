@@ -5,6 +5,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
 
 dotenv.config();
+
+const stripe = require("stripe")(process.env.PAYMENT_SK_KEY);
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -272,7 +275,6 @@ client
     });
 
     // adaptation
-    // Mark pet as adopted
     app.patch("/pets/adopt/:id", async (req, res) => {
       try {
         const { id } = req.params;
@@ -360,6 +362,133 @@ client
       } catch (err) {
         console.error("❌ Error submitting adoption:", err);
         res.status(500).json({ error: "Failed to submit adoption request" });
+      }
+    });
+
+    //ADoption
+
+    app.get("/adoptions/my-pets-requests", verifyFBToken, async (req, res) => {
+      try {
+        const ownerEmail = req.decoded.email;
+
+        const myPets = await petsCollection.find({ ownerEmail }).toArray();
+        const myPetIds = myPets.map((p) => p._id);
+
+        const requests = await adoptionsCollection
+          .find({ petId: { $in: myPetIds } })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(requests);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // POST /adoptions
+    app.post("/adoptions", verifyFBToken, async (req, res) => {
+      try {
+        const { petId, userName, userEmail, phone, address } = req.body;
+
+        if (!petId || !userName || !userEmail || !phone || !address) {
+          return res.status(400).json({ error: "Missing required fields" });
+        }
+
+        const pet = await petsCollection.findOne({ _id: new ObjectId(petId) });
+        if (!pet) return res.status(404).json({ error: "Pet not found" });
+        if (pet.adopted)
+          return res.status(400).json({ error: "Pet already adopted" });
+
+        const adoption = {
+          petId: new ObjectId(petId), // ✅ Important: ObjectId
+          petName: pet.name,
+          petImage: pet.image,
+          userName,
+          userEmail,
+          phone,
+          address,
+          status: "pending",
+          createdAt: new Date(),
+        };
+
+        const result = await adoptionsCollection.insertOne(adoption);
+
+        res.status(201).json({
+          message: "Adoption request submitted successfully",
+          adoptionId: result.insertedId,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Server error" });
+      }
+    });
+
+    // Accept adoption request
+    app.patch("/adoptions/accept/:id", verifyFBToken, async (req, res) => {
+      try {
+        const requestId = req.params.id;
+
+        const adoption = await adoptionsCollection.findOne({
+          _id: new ObjectId(requestId),
+        });
+        if (!adoption)
+          return res.status(404).json({ message: "Request not found" });
+
+        // Check if logged-in user owns the pet
+        const pet = await petsCollection.findOne({
+          _id: new ObjectId(adoption.petId),
+        });
+        if (!pet || pet.ownerEmail !== req.decoded.email)
+          return res.status(403).json({ message: "Not authorized" });
+
+        // Update request status
+        await adoptionsCollection.updateOne(
+          { _id: new ObjectId(requestId) },
+          { $set: { status: "accepted" } }
+        );
+
+        // Mark pet as adopted
+        await petsCollection.updateOne(
+          { _id: new ObjectId(adoption.petId) },
+          { $set: { adopted: true } }
+        );
+
+        res.json({ message: "Adoption request accepted" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // Reject adoption request
+    app.patch("/adoptions/reject/:id", verifyFBToken, async (req, res) => {
+      try {
+        const requestId = req.params.id;
+
+        const adoption = await adoptionsCollection.findOne({
+          _id: new ObjectId(requestId),
+        });
+        if (!adoption)
+          return res.status(404).json({ message: "Request not found" });
+
+        // Check if logged-in user owns the pet
+        const pet = await petsCollection.findOne({
+          _id: new ObjectId(adoption.petId),
+        });
+        if (!pet || pet.ownerEmail !== req.decoded.email)
+          return res.status(403).json({ message: "Not authorized" });
+
+        // Update request status
+        await adoptionsCollection.updateOne(
+          { _id: new ObjectId(requestId) },
+          { $set: { status: "rejected" } }
+        );
+
+        res.json({ message: "Adoption request rejected" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
       }
     });
 
@@ -494,39 +623,6 @@ client
       }
     });
 
-    // Toggle pause/unpause
-    app.patch(
-      "/donationCampaigns/pause/:id",
-      verifyFBToken,
-      async (req, res) => {
-        try {
-          const { id } = req.params;
-          const campaign = await donationCollection.findOne({
-            _id: new ObjectId(id),
-          });
-
-          if (!campaign) {
-            return res.status(404).json({ message: "Campaign not found" });
-          }
-
-          const updatedCampaign = await donationCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: { paused: !campaign.paused } } // toggle paused
-          );
-
-          res.status(200).json({
-            message: `Campaign is now ${
-              !campaign.paused ? "Paused" : "Active"
-            }`,
-            paused: !campaign.paused,
-          });
-        } catch (err) {
-          console.error("Pause/Unpause Error:", err);
-          res.status(500).json({ message: "Server error" });
-        }
-      }
-    );
-
     // Optional: Get Donators for a campaign
     app.get(
       "/donationCampaigns/donators/:id",
@@ -559,6 +655,194 @@ client
         res.json(campaigns);
       } catch (err) {
         console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    app.post("/donations/make/:campaignId", verifyFBToken, async (req, res) => {
+      const { campaignId } = req.params;
+      const { amount } = req.body;
+      const email = req.decoded.email;
+      const name = req.decoded.name;
+
+      try {
+        const campaign = await donationCollection.findOne({
+          _id: new ObjectId(campaignId),
+        });
+        if (!campaign)
+          return res.status(404).json({ message: "Campaign not found" });
+
+        // add donator
+        await donationCollection.updateOne(
+          { _id: new ObjectId(campaignId) },
+          {
+            $push: {
+              donators: { name, email, amount, createdAt: new Date() },
+            },
+          }
+        );
+
+        res.json({ message: "Donation successful" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // Get logged-in user's donations
+    app.get("/donations/my-donations", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+        // Find campaigns where user donated
+        const campaigns = await donationCollection
+          .find({ "donators.email": email })
+          .toArray();
+
+        // Map to only user's donations
+        const myDonations = campaigns.flatMap((campaign) =>
+          (campaign.donators || [])
+            .filter((d) => d.email === email)
+            .map((d) => ({
+              campaignId: campaign._id,
+              petName: campaign.petName,
+              imageUrl: campaign.imageUrl,
+              amount: d.amount,
+              donatedAt: d.createdAt,
+            }))
+        );
+
+        res.json(myDonations);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // DELETE / Refund donation
+    // Refund a donation
+    app.delete(
+      "/donations/refund/:campaignId",
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const email = req.decoded.email;
+          const { campaignId } = req.params;
+
+          const campaign = await donationCollection.findOne({
+            _id: new ObjectId(campaignId),
+          });
+
+          if (!campaign)
+            return res.status(404).json({ message: "Campaign not found" });
+
+          // Check if user has donated
+          const userDonation = (campaign.donators || []).find(
+            (d) => d.email === email
+          );
+          if (!userDonation)
+            return res.status(400).json({ message: "You have not donated" });
+
+          // Remove user's donation
+          await donationCollection.updateOne(
+            { _id: new ObjectId(campaignId) },
+            { $pull: { donators: { email } } }
+          );
+
+          res.json({ message: "Donation refunded successfully" });
+        } catch (err) {
+          console.error(err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // GET a single donation campaign by ID (public)
+    app.get("/donationCampaigns/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid campaign ID" });
+        }
+
+        const campaign = await donationCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!campaign) {
+          return res.status(404).json({ message: "Campaign not found" });
+        }
+
+        res.json(campaign);
+      } catch (err) {
+        console.error("Fetch campaign error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    //                     payment
+
+    // 1️⃣ Create Payment Intent
+    // Server-side route
+    app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
+      try {
+        const { amount, campaignId } = req.body;
+
+        if (!amount || !campaignId) {
+          return res
+            .status(400)
+            .json({ message: "Amount and campaignId required" });
+        }
+
+        // ✅ এখানে use করতে হবে
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(amount * 100), // Stripe expects cents
+          currency: "usd",
+          metadata: {
+            campaignId,
+            email: req.decoded.email,
+            name: req.decoded.name,
+          },
+        });
+
+        res.status(200).json({ clientSecret: paymentIntent.client_secret });
+      } catch (err) {
+        console.error("Stripe PaymentIntent Error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // 3️⃣ Save Donation after successful payment
+    app.post("/save-donation", verifyFBToken, async (req, res) => {
+      try {
+        const { campaignId, amount, paymentId } = req.body;
+
+        if (!campaignId || !amount || !paymentId) {
+          return res.status(400).json({ message: "Missing fields" });
+        }
+
+        const campaign = await donationCollection.findOne({
+          _id: new ObjectId(campaignId),
+        });
+        if (!campaign)
+          return res.status(404).json({ message: "Campaign not found" });
+
+        const donation = {
+          name: req.decoded.name,
+          email: req.decoded.email,
+          amount: parseFloat(amount),
+          paymentId,
+          createdAt: new Date(),
+        };
+
+        await donationCollection.updateOne(
+          { _id: new ObjectId(campaignId) },
+          { $push: { donators: donation } }
+        );
+
+        res.status(200).json({ message: "Donation saved successfully" });
+      } catch (err) {
+        console.error("Save Donation Error:", err);
         res.status(500).json({ message: "Server error" });
       }
     });
