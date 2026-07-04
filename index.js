@@ -3,10 +3,32 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
+const cloudinary = require("cloudinary").v2;
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const multer = require("multer");
 
 dotenv.config();
 
 const stripe = require("stripe")(process.env.PAYMENT_SK_KEY);
+
+// Cloudinary Configuration
+cloudinary.config({
+  cloud_name: process.env.VITE_CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Multer Storage Configuration for Cloudinary
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: "pawlume", // Folder name in Cloudinary
+    allowed_formats: ["jpg", "png", "jpeg", "webp"],
+    upload_preset: process.env.VITE_CLOUDINARY_UPLOAD_PRESET,
+  },
+});
+
+const upload = multer({ storage: storage });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -14,7 +36,10 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-const serviceAccount = require("./firebase_admin_key.json");
+const decodedKey = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
+);
+const serviceAccount = JSON.parse(decodedKey);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -41,7 +66,7 @@ client
 
     console.log("✅ MongoDB connected!");
 
-    // verify
+    // verify Firebase token
     const verifyFBToken = async (req, res, next) => {
       const authHeader = req.headers.authorization;
       if (!authHeader) {
@@ -71,43 +96,288 @@ client
       }
     };
 
+    // verifyAdmin
+
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const user = await usersCollection.findOne({ email });
+      if (!user || user.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden access" });
+      }
+      next();
+    };
+
     // Home route
     app.get("/", (req, res) => {
       res.send("Welcome to Pawlume API 🚀");
     });
 
+    // Admin
+
+    //All pets
+    // GET /admin/pets - Admin only
+    app.get("/admin/pets", verifyFBToken, verifyAdmin, async (req, res) => {
+      try {
+        const pets = await petsCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(pets); // Frontend এ table হিসেবে দেখানো যাবে
+      } catch (err) {
+        console.error("Fetch all pets error:", err);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
+
+    // DELETE /admin/pets/:id - Admin only
+    app.delete(
+      "/admin/pets/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          if (!ObjectId.isValid(id))
+            return res.status(400).json({ message: "Invalid pet ID" });
+
+          const result = await petsCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+          if (result.deletedCount === 0)
+            return res.status(404).json({ message: "Pet not found" });
+
+          res.json({ message: "Pet deleted successfully" });
+        } catch (err) {
+          console.error("Delete pet error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // PATCH /admin/pets/:id - Admin only (update pet or adopted status)
+    app.patch(
+      "/admin/pets/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const updatedData = { ...req.body };
+          delete updatedData._id; // _id change হবে না
+
+          if (!ObjectId.isValid(id))
+            return res.status(400).json({ message: "Invalid pet ID" });
+
+          const result = await petsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updatedData }
+          );
+
+          res.json({
+            message: "Pet updated successfully",
+            modifiedCount: result.modifiedCount,
+          });
+        } catch (err) {
+          console.error("Update pet error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // Get all users (Admin only)
+    app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
+      const users = await usersCollection.find().toArray();
+      res.json(users);
+    });
+
+    // Make a user admin
+    app.patch(
+      "/users/make-admin/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role: "admin" } }
+        );
+        res.json({ modifiedCount: result.modifiedCount });
+      }
+    );
+
+    // Ban a user
+    app.patch(
+      "/users/ban/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { banned: true } }
+        );
+        res.json({ modifiedCount: result.modifiedCount });
+      }
+    );
+
+    // Unban a user
+    app.patch(
+      "/users/unban/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid user ID" });
+        }
+
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { banned: false } }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.json({
+          modifiedCount: result.modifiedCount,
+          message: "User unbanned",
+        });
+      }
+    );
+
+    //  Admin all donations api
+    // GET /admin/donations - Admin only
+    app.get(
+      "/admin/donations",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const donations = await donationCollection
+            .find()
+            .sort({ createdAt: -1 })
+            .toArray();
+          res.json(donations);
+        } catch (err) {
+          console.error("Fetch all donations error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // DELETE /admin/donations/:id - Admin only
+    app.delete(
+      "/admin/donations/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          if (!ObjectId.isValid(id))
+            return res.status(400).json({ message: "Invalid donation ID" });
+
+          const result = await donationCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+          if (result.deletedCount === 0)
+            return res.status(404).json({ message: "Donation not found" });
+
+          res.json({ message: "Donation deleted successfully" });
+        } catch (err) {
+          console.error("Delete donation error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
+    // PATCH /admin/donations/:id - Admin only
+    app.patch(
+      "/admin/donations/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const updatedData = { ...req.body };
+          delete updatedData._id; // _id change হবে না
+
+          if (!ObjectId.isValid(id))
+            return res.status(400).json({ message: "Invalid donation ID" });
+
+          const result = await donationCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updatedData }
+          );
+
+          res.json({
+            message: "Donation updated successfully",
+            modifiedCount: result.modifiedCount,
+          });
+        } catch (err) {
+          console.error("Update donation error:", err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
+
     // Users
+    // server.js / index.js
+    app.get("/users/role/:email", async (req, res) => {
+      const email = req.params.email;
+      try {
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+        res.json({ role: user.role });
+      } catch (error) {
+        res.status(500).json({ message: error.message });
+      }
+    });
+
     // Add a user
     app.post("/users", async (req, res) => {
       try {
-        const { name, email, role } = req.body;
+        const { name, email, role, photoURL } = req.body;
 
-        if (!email) return res.status(400).json({ error: "Email is required" });
+        if (!email) {
+          return res.status(400).json({ error: "Email is required" });
+        }
 
+        // Check if user already exists
         const existingUser = await usersCollection.findOne({ email });
-        if (existingUser)
-          return res.status(200).json({ message: "User already exists" });
+        if (existingUser) {
+          return res
+            .status(200)
+            .json({ message: "User already exists", user: existingUser });
+        }
 
-        const result = await usersCollection.insertOne({
+        // Insert new user
+        const newUser = {
           name: name || "Anonymous",
           email,
+          photoURL: photoURL || "https://ui-avatars.com/api/?name=Anonymous&background=random", // ✅ Save photo
           role: role || "user",
           createdAt: new Date(),
-        });
+        };
+
+        const result = await usersCollection.insertOne(newUser);
 
         res.status(201).json({
           message: "User added successfully",
-          userId: result.insertedId,
+          user: { ...newUser, _id: result.insertedId }, // ✅ Send full user data
         });
       } catch (err) {
-        console.error(err);
+        console.error("User Insert Error:", err);
         res.status(500).json({ error: "Failed to add user" });
       }
     });
 
     // Pet listing route
     // Example
-    app.get("/pets", verifyFBToken, async (req, res) => {
+    app.get("/pets", async (req, res) => {
       try {
         const { search = "", category = "", page = 1, limit = 6 } = req.query;
 
@@ -251,7 +521,7 @@ client
       }
     });
 
-    app.delete("/pets/:id", async (req, res) => {
+    app.delete("/pets/:id", verifyFBToken, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -311,26 +581,13 @@ client
       }
     });
 
-    app.post("/adoptions", async (req, res) => {
+    app.post("/adoptions", verifyFBToken, async (req, res) => {
       try {
-        const {
-          petId,
-          petName,
-          petImage,
-          userName,
-          userEmail,
-          phone,
-          address,
-          status = "pending",
-          createdAt = new Date(),
-        } = req.body;
+        const { petId, userName, phone, address } = req.body;
+        const userEmail = req.decoded.email;
 
         if (!petId || !userName || !userEmail || !phone || !address) {
           return res.status(400).json({ error: "Missing required fields" });
-        }
-
-        if (!ObjectId.isValid(petId)) {
-          return res.status(400).json({ error: "Invalid pet ID" });
         }
 
         const pet = await petsCollection.findOne({ _id: new ObjectId(petId) });
@@ -340,70 +597,8 @@ client
 
         const adoption = {
           petId: new ObjectId(petId),
-          petName,
-          petImage,
-          userName, // <-- use the userName from req.body
-          userEmail,
-          phone,
-          address,
-          status,
-          createdAt: new Date(createdAt),
-        };
-
-        const result = await adoptionsCollection.insertOne(adoption);
-
-        // Optionally mark pet as adopted immediately:
-        // await petsCollection.updateOne({ _id: new ObjectId(petId) }, { $set: { adopted: true } });
-
-        res.status(201).json({
-          message: "Adoption request submitted successfully",
-          adoptionId: result.insertedId,
-        });
-      } catch (err) {
-        console.error("❌ Error submitting adoption:", err);
-        res.status(500).json({ error: "Failed to submit adoption request" });
-      }
-    });
-
-    //ADoption
-
-    app.get("/adoptions/my-pets-requests", verifyFBToken, async (req, res) => {
-      try {
-        const ownerEmail = req.decoded.email;
-
-        const myPets = await petsCollection.find({ ownerEmail }).toArray();
-        const myPetIds = myPets.map((p) => p._id);
-
-        const requests = await adoptionsCollection
-          .find({ petId: { $in: myPetIds } })
-          .sort({ createdAt: -1 })
-          .toArray();
-
-        res.json(requests);
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: "Server error" });
-      }
-    });
-
-    // POST /adoptions
-    app.post("/adoptions", verifyFBToken, async (req, res) => {
-      try {
-        const { petId, userName, userEmail, phone, address } = req.body;
-
-        if (!petId || !userName || !userEmail || !phone || !address) {
-          return res.status(400).json({ error: "Missing required fields" });
-        }
-
-        const pet = await petsCollection.findOne({ _id: new ObjectId(petId) });
-        if (!pet) return res.status(404).json({ error: "Pet not found" });
-        if (pet.adopted)
-          return res.status(400).json({ error: "Pet already adopted" });
-
-        const adoption = {
-          petId: new ObjectId(petId), // ✅ Important: ObjectId
           petName: pet.name,
-          petImage: pet.image,
+          petImage: pet.imageUrl,
           userName,
           userEmail,
           phone,
@@ -421,6 +616,25 @@ client
       } catch (err) {
         console.error(err);
         res.status(500).json({ error: "Server error" });
+      }
+    });
+
+    app.get("/adoptions/my-pets-requests", verifyFBToken, async (req, res) => {
+      try {
+        const ownerEmail = req.decoded.email;
+
+        const myPets = await petsCollection.find({ ownerEmail }).toArray();
+        const myPetIds = myPets.map((p) => p._id);
+
+        const requests = await adoptionsCollection
+          .find({ petId: { $in: myPetIds } })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json(requests);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
       }
     });
 
@@ -561,7 +775,7 @@ client
     );
 
     // Edit Donation Campaign (protected)
-    app.put("/donationCampaigns/edit/:id", verifyFBToken, async (req, res) => {
+    app.patch("/donationCampaigns/:id", verifyFBToken, async (req, res) => {
       try {
         const campaignId = req.params.id;
         const {
@@ -592,9 +806,9 @@ client
         if (!campaign)
           return res.status(404).json({ message: "Campaign not found" });
         if (campaign.ownerEmail !== req.decoded.email) {
-          return res
-            .status(403)
-            .json({ message: "You are not authorized to edit this campaign" });
+          return res.status(403).json({
+            message: "You are not authorized to edit this campaign",
+          });
         }
 
         // Update the campaign
@@ -645,14 +859,27 @@ client
       }
     );
 
-    // Optional: Get all donation campaigns
+    // Get all donation campaigns (paginated)
     app.get("/donationCampaigns", async (req, res) => {
       try {
+        const { page = 1, limit = 6 } = req.query;
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+
+        const total = await donationCollection.countDocuments();
         const campaigns = await donationCollection
           .find()
           .sort({ createdAt: -1 })
+          .skip((pageNum - 1) * limitNum)
+          .limit(limitNum)
           .toArray();
-        res.json(campaigns);
+
+        res.json({
+          campaigns,
+          total,
+          currentPage: pageNum,
+          totalPages: Math.ceil(total / limitNum),
+        });
       } catch (err) {
         console.error(err);
         res.status(500).json({ message: "Server error" });
@@ -755,6 +982,49 @@ client
         }
       }
     );
+    // Pause Donation Campaign (protected)
+    app.patch(
+      "/donationCampaigns/pause/:id",
+      verifyFBToken,
+      async (req, res) => {
+        try {
+          const campaignId = req.params.id;
+
+          if (!ObjectId.isValid(campaignId))
+            return res.status(400).json({ message: "Invalid campaign ID" });
+
+          const campaign = await donationCollection.findOne({
+            _id: new ObjectId(campaignId),
+          });
+
+          if (!campaign)
+            return res.status(404).json({ message: "Campaign not found" });
+
+          // Check ownership
+          if (campaign.ownerEmail !== req.decoded.email)
+            return res.status(403).json({ message: "Not authorized" });
+
+          // Toggle paused field
+          const newPausedValue = !campaign.paused; // switch true/false
+
+          const updated = await donationCollection.updateOne(
+            { _id: new ObjectId(campaignId) },
+            { $set: { paused: newPausedValue } }
+          );
+
+          res.json({
+            message: newPausedValue
+              ? "Donation campaign paused"
+              : "Donation campaign unpaused",
+            paused: newPausedValue,
+            modifiedCount: updated.modifiedCount,
+          });
+        } catch (err) {
+          console.error(err);
+          res.status(500).json({ message: "Server error" });
+        }
+      }
+    );
 
     // GET a single donation campaign by ID (public)
     app.get("/donationCampaigns/:id", async (req, res) => {
@@ -846,6 +1116,25 @@ client
         res.status(500).json({ message: "Server error" });
       }
     });
+
+    // 🖼️ Image Upload Route (using Cloudinary)
+    app.post(
+      "/upload-image",
+      verifyFBToken,
+      upload.single("image"),
+      async (req, res) => {
+        try {
+          if (!req.file) {
+            return res.status(400).json({ message: "No image uploaded" });
+          }
+          // The image URL is available in req.file.path after successful upload to Cloudinary
+          res.json({ imageUrl: req.file.path });
+        } catch (error) {
+          console.error("❌ Image upload error:", error);
+          res.status(500).json({ message: "Image upload failed" });
+        }
+      }
+    );
 
     // Start server
     app.listen(PORT, () => {
